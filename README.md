@@ -83,27 +83,22 @@ The output CSV is the input CSV plus four columns:
 | Column | Type | Meaning |
 |---|---|---|
 | `wav2vec_phone_seq` | string | Greedy CTC phone sequence, space-separated |
-| `frame_start` | int | First logit frame included (inclusive) |
-| `frame_end` | int | Last logit frame, exclusive |
+| `frame_start` | int | First logit frame included |
+| `frame_end` | int | Last logit frame|
 | `n_frames` | int | `frame_end - frame_start` |
 
-The frame columns exist for diagnosis. They let you separate "the model emitted
-nothing for this word" from "the window handed to the model was empty," which
-otherwise look identical in the phone column.
+
 
 ### 3.1 Reading empty and sentinel values
 
 | What you see | What it means | Action |
 |---|---|---|
 | Phones present | Normal result | — |
-| Phones empty, `n_frames` ≥ 1 | Window existed, every frame decoded to blank | Genuine no-output. Deletion / very short word candidate |
-| Phones empty, `n_frames` = 0 | `end <= start`, or start beyond audio end | Upstream timestamp bug — fix the aligner, not this script |
-| All four columns empty | Start/end cell missing or unparseable as float | Check the input CSV |
-| `__NO_AUDIO__` | Utterance absent from `wav.scp`, or file not on disk | Path / manifest problem |
+| Phones empty, `n_frames` ≥ 1 | Window existed, every frame decoded to blank | Genuine no-output. |
+| Phones empty, `n_frames` = 0 | `end <= start`, or start beyond audio end | time stamd isseu or alignment issue |
+| `__NO_AUDIO__` | Utterance absent from `wav.scp`, or file not on disk | Path  problem |
 | `__LOAD_FAIL__` | `librosa.load()` raised | Corrupt or unreadable audio |
 
-Delete the two sentinel assignments in `process()` if you prefer plain blanks,
-but then the four cases above collapse into one and become indistinguishable.
 
 ---
 
@@ -117,7 +112,7 @@ Edit the config block at the top of the file. Nothing else needs touching.
 CSV_FILE   = "/path/to/input.csv"
 WAV_SCP    = "/path/to/wav.scp"
 OUTPUT_CSV = "/path/to/output.csv"
-MODEL_PATH = "/path/to/model"
+MODEL_PATH = "/path/to/wav2vec_model"
 
 SAMPLE_RATE = 16000
 
@@ -126,8 +121,6 @@ START_COL = "ASR_Start_time"
 END_COL   = "ASR_end_time"
 ```
 
-If your CSV uses different column names, change these constants. Do not edit the
-function bodies — every column reference goes through these names.
 
 ### 4.2 Execute
 
@@ -144,10 +137,10 @@ CUDA_VISIBLE_DEVICES=0 python extract_wav2vec_phone_seq.py
 
 ---
 
-## 5. Design notes and stated assumptions
+## 5. Design notes
 
 
-### 5.1 CTC blank is assumed to sit at `tokenizer.pad_token_id`
+### 5.1 CTC blank is taken to sit at `tokenizer.pad_token_id`
 
 Decoding uses `processor.batch_decode(..., skip_special_tokens=True)`. The
 HuggingFace `Wav2Vec2CTCTokenizer` performs CTC collapse by treating the
@@ -155,8 +148,7 @@ HuggingFace `Wav2Vec2CTCTokenizer` performs CTC collapse by treating the
 
 If a model is ever swapped in whose blank index is not the pad token index, the
 collapse silently misbehaves: true blanks survive into the output as ordinary
-symbols, and repeat-merging happens around the wrong index. There is no
-exception, no warning — just subtly wrong phone strings.
+symbols, and repeat-merging happens around the wrong index. 
 
 Verification before using a new model:
 
@@ -180,11 +172,6 @@ frame_end   = math.ceil(end_sec  / frame_duration)
 on each side. Combined with each frame's ~25 ms receptive field, a small amount
 of neighboring-phone acoustic evidence bleeds into every window.
 
-This favors recall over precision: short words are less likely to produce an
-empty sequence, at the cost of occasional spurious boundary phones. Flip to
-`ceil` on start and `floor` on end for the opposite trade-off — but do it
-globally, and note which convention produced any given results file, because the
-two are not comparable.
 
 ### 5.4 Very short segments cannot crash the model
 
