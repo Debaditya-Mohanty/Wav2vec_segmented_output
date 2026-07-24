@@ -9,9 +9,8 @@ sequence.
 
 ---
 
-## 1. What the script actually does
+## 1. Functioning of the scripts
 
-The important detail, stated up front because it is easy to misread:
 
 **The model is run once on the entire utterance. The audio is never cut.**
 Segmentation happens on the *logit matrix*, after the forward pass, by slicing a
@@ -31,19 +30,9 @@ Pipeline per utterance:
      repeats and strip blanks,
    - store the resulting phone string plus the frame indices used.
 5. After all utterances, write the original CSV back out with four new columns
-   appended. Row order and every original column are preserved.
+   appended.
 
-Grouping rows by utterance before decoding is the only real optimization: a
-30-word utterance costs one forward pass, not thirty.
 
-### Consequence worth understanding
-
-Because the transformer attends over the whole utterance before slicing, the
-frames inside a word's window already encode acoustic context from outside that
-window. This is **not** the same as feeding the isolated word audio to the model
-and decoding it. For GOP-style scoring and miscue detection that is normally the
-behavior you want — it matches how the model saw the data at training time — but
-do not describe the output as "the word decoded independently," because it isn't.
 
 ---
 
@@ -77,9 +66,7 @@ utt_id_0002 /absolute/path/to/audio_0002.wav
 ```
 
 Split is on first whitespace only (`maxsplit=1`), so paths containing spaces
-survive. Extended `wav.scp` entries that use a pipe command
-(`utt_id sox ... - |`) are **not** supported — the script calls
-`os.path.exists()` on whatever follows the ID and will skip the utterance.
+survive.
 
 ### 2.3 Model
 
@@ -155,27 +142,10 @@ device:
 CUDA_VISIBLE_DEVICES=0 python extract_wav2vec_phone_seq.py
 ```
 
-Progress is shown per utterance via `tqdm`. Warnings for missing audio print to
-stdout as they occur; redirect stderr/stdout to a log if the run is long.
-
-### 4.3 Dependencies
-
-```
-torch
-transformers
-librosa
-tqdm
-```
-
-Standard library: `os`, `csv`, `math`, `collections`.
-
 ---
 
 ## 5. Design notes and stated assumptions
 
-These are deliberate choices, not oversights. They are recorded here because
-they are invisible in the code and will cause silent, plausible-looking wrong
-output if the surrounding conditions change.
 
 ### 5.1 CTC blank is assumed to sit at `tokenizer.pad_token_id`
 
@@ -198,23 +168,6 @@ print(processor.tokenizer.get_vocab())
 Confirm the blank index matches `pad_token_id`. If it does not, replace
 `batch_decode` with an explicit collapse that takes the blank id as a parameter.
 
-### 5.2 Frame duration is derived from the audio, not from the model stride
-
-```python
-frame_duration = utterance_duration_sec / total_frames
-```
-
-The true wav2vec2 hop is 320 samples = 20 ms exactly
-(`model.config.inputs_to_logits_ratio / SAMPLE_RATE`). The convolutional
-frontend consumes a receptive field at the start, so `total_frames` is slightly
-fewer than `duration / 0.02`, which makes the derived `frame_duration` slightly
-larger than 20 ms.
-
-Net effect is roughly a one-frame (~20 ms) systematic offset, largely
-independent of utterance length. This was measured and accepted as tolerable for
-the current task. If sub-frame boundary precision ever matters, switch to the
-config-derived stride — but re-derive any thresholds tuned against the current
-behavior, because they absorbed this offset.
 
 ### 5.3 Window boundaries are widened, not tightened
 
@@ -238,40 +191,11 @@ two are not comparable.
 Since slicing happens on logits rather than waveform, the usual wav2vec2
 minimum-input-length convolution error cannot occur here. Any positive-duration
 window yields at least one frame. A word too short to contain a phone therefore
-returns an empty string with `n_frames` ≥ 1 — see §3.1 — rather than raising.
+returns an empty string with `n_frames` ≥ 1 .
 
 One genuine edge case: when `start == end`, whether you get zero frames or one
 depends on whether `start / frame_duration` lands exactly on an integer. Filter
 zero-duration rows upstream rather than relying on float remainders.
 
-### 5.5 Exception handling is deliberately narrow in one place
 
-Timestamp parsing catches only `(KeyError, ValueError, TypeError)`. Anything
-else — CUDA OOM, tokenizer failure, disk error — is allowed to propagate and
-kill the run. A crashed run is recoverable; a run that silently wrote thousands
-of empty cells because a bare `except:` swallowed an OOM is not.
 
-The `try` inside `decode_segment` remains broad, and will return an empty string
-on any decoding failure. Tighten it if silent decode failures become a concern.
-
----
-
-## 6. Suggested first check after a run
-
-```python
-import pandas as pd
-df = pd.read_csv(OUTPUT_CSV)
-
-print(df["n_frames"].describe())
-print((df["wav2vec_phone_seq"].fillna("") == "").sum(), "empty rows")
-
-# do empty outputs cluster at short windows, or are they scattered?
-print(df.assign(empty=df["wav2vec_phone_seq"].fillna("") == "")
-        .groupby(pd.cut(df["n_frames"], [0, 2, 5, 10, 25, 1000]))["empty"]
-        .mean())
-```
-
-If empty outputs concentrate in the lowest frame buckets, the cause is segment
-length and a duration threshold is the right fix. If they are scattered evenly
-across bucket sizes, segment length is not the problem — look at alignment
-quality or model/domain mismatch instead.
